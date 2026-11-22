@@ -14,9 +14,12 @@ st.set_page_config(
 )
 
 st.title("🔊 Smart Noise Detection System")
-st.write("Live Noise Monitoring Dashboard")
+st.caption("Real-Time Microphone Noise Monitoring")
 
-# Shared audio state
+# -----------------------------
+# AUDIO STATE
+# -----------------------------
+
 class AudioState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -26,7 +29,10 @@ class AudioState:
 
 audio = AudioState()
 
-# Audio processing
+# -----------------------------
+# AUDIO CALLBACK
+# -----------------------------
+
 def audio_callback(frame: av.AudioFrame):
 
     samples = frame.to_ndarray().astype(np.float32)
@@ -34,43 +40,62 @@ def audio_callback(frame: av.AudioFrame):
     if samples.size == 0:
         return frame
 
-    level = float(np.sqrt(np.mean(samples ** 2)))
+    # Convert audio samples to mono if required
+    samples = samples.flatten()
+
+    # Calculate RMS audio level
+    rms = float(np.sqrt(np.mean(samples ** 2)))
+
+    # Normalize display level
+    if np.issubdtype(frame.to_ndarray().dtype, np.integer):
+        scale = float(max(abs(np.iinfo(frame.to_ndarray().dtype).min),
+                          np.iinfo(frame.to_ndarray().dtype).max))
+        display_level = (rms / scale) * 1000
+    else:
+        display_level = rms * 1000
 
     with audio.lock:
-        audio.level = level
-        audio.history.append(level)
+        audio.level = display_level
+        audio.history.append(display_level)
         audio.history = audio.history[-100:]
         audio.last_update = time.time()
 
     return frame
 
+# -----------------------------
+# SIDEBAR
+# -----------------------------
 
-# Sidebar settings
-st.sidebar.header("⚙️ Settings")
+st.sidebar.header("⚙️ Monitoring Settings")
 
 threshold = st.sidebar.slider(
     "Noise Threshold",
-    min_value=100,
-    max_value=15000,
-    value=3000,
-    step=100
+    min_value=1,
+    max_value=1000,
+    value=100,
+    step=10
 )
 
 st.sidebar.caption(
-    "Threshold uses raw audio amplitude, not calibrated dB."
+    "Threshold is a relative audio level, not calibrated dB."
 )
 
-# Microphone section
+# -----------------------------
+# MICROPHONE CONNECTION
+# -----------------------------
+
 st.subheader("🎙️ Microphone Monitoring")
 
 ctx = webrtc_streamer(
     key="noise-monitor",
     mode=WebRtcMode.SENDONLY,
     audio_frame_callback=audio_callback,
+
     media_stream_constraints={
         "audio": True,
         "video": False
     },
+
     rtc_configuration={
         "iceServers": [
             {
@@ -78,16 +103,39 @@ ctx = webrtc_streamer(
             }
         ]
     },
+
     async_processing=True
 )
 
-# Dashboard
-st.subheader("📊 Live Monitoring")
+# -----------------------------
+# LIVE DASHBOARD
+# -----------------------------
+
+st.subheader("📊 Live Monitoring Dashboard")
 
 with audio.lock:
     current_level = audio.level
     history = audio.history.copy()
     last_update = audio.last_update
+
+audio_received = (
+    last_update > 0 and
+    time.time() - last_update < 5
+)
+
+if audio_received:
+
+    if current_level > threshold:
+        status = "NOISE DETECTED"
+    else:
+        status = "NORMAL"
+
+else:
+    status = "WAITING FOR AUDIO"
+
+# -----------------------------
+# METRICS
+# -----------------------------
 
 col1, col2, col3 = st.columns(3)
 
@@ -96,28 +144,50 @@ col1.metric(
     round(current_level, 2)
 )
 
-if last_update and time.time() - last_update < 3:
-    status = (
-        "NOISE DETECTED"
-        if current_level > threshold
-        else "NORMAL"
-    )
-else:
-    status = "WAITING FOR AUDIO"
+col2.metric(
+    "Monitoring Status",
+    status
+)
 
-col2.metric("Monitoring Status", status)
+col3.metric(
+    "Monitoring Range",
+    "50 Feet Target"
+)
 
-col3.metric("Target Range", "50 Feet")
+# -----------------------------
+# ALERT
+# -----------------------------
 
-# Alerts
 if status == "NOISE DETECTED":
+
     st.error("🚨 LOUD NOISE DETECTED!")
+
 elif status == "NORMAL":
+
     st.success("✅ Environment Normal")
+
 else:
+
     st.warning("🎙️ Waiting for microphone audio...")
 
-# Graph
+# -----------------------------
+# CONNECTION STATUS
+# -----------------------------
+
+if ctx.state.playing:
+
+    st.success("Microphone stream is connected.")
+
+else:
+
+    st.info("Click START to activate microphone.")
+
+# -----------------------------
+# GRAPH
+# -----------------------------
+
+st.subheader("📈 Live Noise Graph")
+
 fig = go.Figure()
 
 fig.add_trace(
@@ -125,7 +195,10 @@ fig.add_trace(
         y=history,
         mode="lines",
         name="Audio Level",
-        line=dict(color="blue", width=2)
+        line=dict(
+            color="blue",
+            width=2
+        )
     )
 )
 
@@ -137,10 +210,12 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Live Noise Monitoring Graph",
     xaxis_title="Recent Audio Samples",
-    yaxis_title="Raw Audio Amplitude",
-    height=400
+    yaxis_title="Relative Audio Level",
+    height=400,
+    yaxis=dict(
+        rangemode="tozero"
+    )
 )
 
 st.plotly_chart(
@@ -148,14 +223,23 @@ st.plotly_chart(
     use_container_width=True
 )
 
-# Connection status
+# -----------------------------
+# AUTO REFRESH
+# -----------------------------
+
 if ctx.state.playing:
-    st.success("Microphone streaming is active.")
-else:
-    st.info("Click START above to activate your microphone.")
+    time.sleep(0.5)
+    st.rerun()
+
+# -----------------------------
+# PROJECT INFORMATION
+# -----------------------------
+
+st.divider()
 
 st.info(
-    "Note: 50-foot detection and sound direction "
-    "are not yet implemented. They require real-world "
-    "testing and suitable microphone hardware."
+    "Current version supports microphone audio monitoring. "
+    "50-foot detection, calibrated decibel measurement, "
+    "direction detection and automatic bell alerts "
+    "are not yet implemented."
 )
